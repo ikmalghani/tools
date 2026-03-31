@@ -3,41 +3,38 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-def softcode_subtitles(video_file, subtitle_file, output_file):
+def softcode_subtitles(video_file, subtitle_files, output_file):
     if not output_file.lower().endswith(".mp4"):
         raise ValueError("Output file must have a .mp4 extension for this script.")
 
     # Use FFmpeg to softcode the subtitles
-    # -map 0:v:0 maps the first video stream from input 0 (video file)
-    # -map 0:a:0 maps the first audio stream from input 0 (video file)
-    # -map 1:0 maps the first subtitle stream from input 1 (subtitle file)
-    # This ensures we use the external subtitle file, not existing ones
-    subprocess.run([
-        "ffmpeg",
-        "-i", video_file,
-        "-i", subtitle_file,
-        "-map", "0:v:0",        # Map video from first input (video file)
-        "-map", "0:a:0",        # Map audio from first input (video file)
-        "-map", "1:0",          # Map subtitle from second input (subtitle file)
-        "-c:v", "copy",         # Copy video without re-encoding
-        "-c:a", "copy",         # Copy audio without re-encoding
-        "-c:s", "mov_text",     # Convert SRT to mov_text (MP4-compatible)
-        output_file
-    ], check=True)
-
-    return f"Processed: {video_file} with {subtitle_file}\nOutput saved to: {output_file}"
+    cmd = ["ffmpeg", "-i", video_file]
+    map_args = ["-map", "0:v:0", "-map", "0:a:0"]
+    input_index = 1
+    for sub in subtitle_files:
+        cmd.extend(["-i", sub])
+        map_args.extend(["-map", f"{input_index}:0"])
+        input_index += 1
+    
+    cmd.extend(map_args)
+    cmd.extend(["-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text", output_file])
+    
+    subprocess.run(cmd, check=True)
+    
+    subs_str = ", ".join(os.path.basename(s) for s in subtitle_files)
+    return f"Processed: {video_file} with {subs_str}\nOutput saved to: {output_file}"
 
 def find_video_and_subtitle_files(directory):
-    """Find video and subtitle files in the given directory"""
+    """Find video and subtitle files in the given directory and subdirectories"""
     video_extensions = ['.mkv', '.mp4', '.avi']
     subtitle_extensions = ['.srt', '.ass']
     
     video_files = []
     subtitle_files = []
     
-    for file in os.listdir(directory):
-        file_path = os.path.join(directory, file)
-        if os.path.isfile(file_path):
+    for root_dir, dirs, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root_dir, file)
             file_ext = os.path.splitext(file)[1].lower()
             if file_ext in video_extensions:
                 video_files.append(file_path)
@@ -99,78 +96,55 @@ def process_directory():
         
         # Process each video file with available subtitle files
         results = []
+        results.append(f"Found {len(video_files)} video files and {len(subtitle_files)} subtitle files")
         for video_file in video_files:
+            video_dir = os.path.dirname(video_file)
             video_name = os.path.basename(video_file)
             video_series, video_episode = extract_episode_info(video_name)
             video_name_no_ext = os.path.splitext(video_name)[0]
             
-            matching_subtitle = None
+            matching_subtitles = []
             
-            # Check if this is a TV episode (has episode info) or a movie (no episode info)
-            if video_episode:
-                # TV Episode logic: Find matching subtitle file using episode info
-                best_match_score = 0
+            for subtitle_file in subtitle_files:
+                sub_dir = os.path.dirname(subtitle_file)
+                sub_name = os.path.basename(subtitle_file)
                 
-                for subtitle_file in subtitle_files:
-                    subtitle_name = os.path.basename(subtitle_file)
-                    subtitle_series, subtitle_episode = extract_episode_info(subtitle_name)
-                    
-                    # Calculate match score
-                    match_score = 0
-                    
-                    # Episode number must match exactly
-                    if video_episode == subtitle_episode and video_episode:
-                        match_score += 10
-                        
-                        # Series name similarity (case-insensitive)
-                        if video_series.lower() == subtitle_series.lower():
-                            match_score += 5
-                        elif video_series.lower() in subtitle_series.lower() or subtitle_series.lower() in video_series.lower():
-                            match_score += 3
-                        
-                        # Additional points for common patterns
-                        if any(pattern in video_name.lower() and pattern in subtitle_name.lower() 
-                               for pattern in ['shark', 'storm', 'phanteam']):
-                            match_score += 2
-                    
-                    if match_score > best_match_score:
-                        best_match_score = match_score
-                        matching_subtitle = subtitle_file
+                # Same directory matching
+                if sub_dir == video_dir:
+                    if video_episode:
+                        # TV Episode: check episode match
+                        sub_series, sub_episode = extract_episode_info(sub_name)
+                        if video_episode == sub_episode:
+                            matching_subtitles.append(subtitle_file)
+                    else:
+                        # Movie: exact name match
+                        if video_name_no_ext.lower() == os.path.splitext(sub_name)[0].lower():
+                            matching_subtitles.append(subtitle_file)
                 
-                # Only process if we found a match with episode score >= 10
-                if matching_subtitle and best_match_score >= 10:
-                    # Create output filename
-                    output_file = os.path.join(directory, f"[Eng Subbed] {video_name_no_ext}.mp4")
-                    
-                    try:
-                        message = softcode_subtitles(video_file, matching_subtitle, output_file)
-                        results.append(f"✓ {message}")
-                    except Exception as e:
-                        results.append(f"✗ Failed to process {video_name}: {str(e)}")
-                else:
-                    results.append(f"⚠ No matching subtitle found for {video_name} (Episode {video_episode})")
+                # Folder matching: if sub is in a subdir path that contains a folder matching the episode
+                elif sub_dir.startswith(video_dir + os.sep) and video_episode:
+                    rel_path = os.path.relpath(sub_dir, video_dir)
+                    path_parts = rel_path.split(os.sep)
+                    match = False
+                    for part in path_parts:
+                        folder_series, folder_episode = extract_episode_info(part)
+                        if folder_episode == video_episode:
+                            match = True
+                            break
+                    if match:
+                        matching_subtitles.append(subtitle_file)
+            
+            if matching_subtitles:
+                # Create output filename in the video's directory
+                output_file = os.path.join(video_dir, f"[Eng Subbed] {video_name_no_ext}.mp4")
+                
+                try:
+                    message = softcode_subtitles(video_file, matching_subtitles, output_file)
+                    results.append(f"✓ {message}")
+                except Exception as e:
+                    results.append(f"✗ Failed to process {video_name}: {str(e)}")
             else:
-                # Movie logic: Find subtitle with exact same name (case-insensitive, without extension)
-                for subtitle_file in subtitle_files:
-                    subtitle_name = os.path.basename(subtitle_file)
-                    subtitle_name_no_ext = os.path.splitext(subtitle_name)[0]
-                    
-                    # Check for exact match (case-insensitive)
-                    if video_name_no_ext.lower() == subtitle_name_no_ext.lower():
-                        matching_subtitle = subtitle_file
-                        break
-                
-                if matching_subtitle:
-                    # Create output filename
-                    output_file = os.path.join(directory, f"[Eng Subbed] {video_name_no_ext}.mp4")
-                    
-                    try:
-                        message = softcode_subtitles(video_file, matching_subtitle, output_file)
-                        results.append(f"✓ {message}")
-                    except Exception as e:
-                        results.append(f"✗ Failed to process {video_name}: {str(e)}")
-                else:
-                    results.append(f"⚠ No matching subtitle found for {video_name} (Movie - exact name match required)")
+                results.append(f"⚠ No matching subtitle found for {video_name} (Episode {video_episode})")
         
         # Show results
         result_text = "\n".join(results)
